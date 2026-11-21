@@ -1,0 +1,89 @@
+
+name: Check Riemann proof (Lean 4.33.1)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/verify-riemann.yml
+
+permissions:
+  contents: read
+
+jobs:
+  compile-and-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout exact proof sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify pinned source configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r\n' < lean-toolchain)" = 'leanprover/lean4:v4.33.1'
+          grep -Fq '0df444a360eaa60ab8c11dca51a86af692955474' lake-manifest.json
+          echo 'Toolchain and Mathlib pin: OK'
+
+      - name: Install Lean via lean-action
+        uses: leanprover/lean-action@v1
+        with:
+          auto-config: false
+          build: false
+          test: false
+          use-mathlib-cache: true
+          use-github-cache: false
+
+      - name: Record exact versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          lake --version | tee lake-version.log
+          lean --version | tee lean-version.log
+          test "$(lean --version | grep -o '4\.33\.1' | head -1)" = '4.33.1'
+
+      - name: Compile mathematical statements
+        shell: bash
+        run: |
+          set -euo pipefail
+          lake build Statements 2>&1 | tee build-statements.log
+
+      - name: Compile entire dependency closure of Main
+        shell: bash
+        run: |
+          set -euo pipefail
+          lake build Main 2>&1 | tee build-main.log
+
+      - name: Check final theorem and transitive axioms
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > AuditRiemann.lean <<'LEAN'
+          import Main
+          #check riemannHypothesis
+          #print axioms riemannHypothesis
+          #print axioms rhOfAll
+          #print axioms allChi
+          LEAN
+          lake env lean AuditRiemann.lean 2>&1 | tee axiom-audit.log
+          if grep -Eq 'sorryAx|Lean\.ofReduceBool' axiom-audit.log; then
+            echo 'WARNING: non-standard proof axiom reported' >&2
+            exit 1
+          fi
+
+      - name: Save execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riemann-lean-build-logs
+          path: |
+            lake-version.log
+            lean-version.log
+            build-statements.log
+            build-main.log
+            axiom-audit.log
+          if-no-files-found: warn
